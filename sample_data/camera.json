@@ -1,0 +1,7 @@
+{
+  "width": 320,
+  "height": 240,
+  "horizontal_fov_deg": 90.0,
+  "camera_height_m": 1.7,
+  "depth_type": "z_depth"
+}

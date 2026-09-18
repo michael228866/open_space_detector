@@ -1,0 +1,38 @@
+depth:
+  min_depth_m: 0.15
+  max_depth_m: 15.0
+  sample_stride: 2
+
+ground:
+  mode: known_height
+  distance_tolerance_m: 0.12
+  max_tilt_deg: 25.0
+  ransac_iterations: 300
+  min_inlier_ratio: 0.08
+
+occupancy:
+  width_m: 10.0
+  depth_m: 10.0
+  resolution_m: 0.10
+  min_obstacle_height_m: 0.15
+  max_obstacle_height_m: 2.20
+  safety_margin_m: 0.25
+  raycast_free_space: true
+
+open_space:
+  min_free_area_m2: 16.0
+  min_rectangle_width_m: 4.0
+  min_rectangle_depth_m: 4.0
+  min_player_clearance_m: 1.0
+  max_obstacle_ratio: 0.15
+  # A single 90-degree view naturally leaves side areas unobserved. Tighten to
+  # 0.20 after multi-view fusion is added.
+  max_unknown_ratio: 0.45
+  nearby_unknown_is_unsafe: false
+
+scoring:
+  free_area_weight: 0.30
+  rectangle_weight: 0.25
+  clearance_weight: 0.20
+  obstacle_weight: 0.10
+  known_space_weight: 0.15

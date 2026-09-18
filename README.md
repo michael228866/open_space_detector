@@ -1,0 +1,173 @@
+# free-space-analyzer
+
+以 Depth Map 為核心，將場景還原成地面占用網格，再判斷室內是否具有足夠大的連續活動空間。V1 不依賴 AI 模型，判定結果可量測、可調參，也能說明失敗原因。
+
+## 已完成能力
+
+- Z-depth 與 radial depth 輸入
+- 深度清洗與 pinhole 3D 投影
+- 已知相機高度或 RANSAC Ground Plane
+- `UNKNOWN / FREE / OCCUPIED` 鳥瞰占用網格
+- ray casting 與障礙物安全邊界
+- 最大連續空地、玩家可達面積
+- 最大軸對齊空矩形
+- 最近障礙物、玩家 clearance、最大 clearance
+- hard rules、0–100 分數與具體失敗原因
+- CLI、JSON 結果與 PNG debug 圖
+- 合成場景產生器與單元測試
+
+## 安裝
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
+python -m pip install -e ".[test]"
+```
+
+## 30 秒跑起來
+
+```bash
+python tools/generate_synthetic_scene.py --output-dir sample_data
+free-space-analyzer sample_data/depth.npy \
+  --camera sample_data/camera.json \
+  --config configs/default.yaml \
+  --output-json output/result.json \
+  --debug-png output/occupancy.png
+```
+
+Windows PowerShell 可寫成一行：
+
+```powershell
+free-space-analyzer sample_data/depth.npy --camera sample_data/camera.json --config configs/default.yaml --output-json output/result.json --debug-png output/occupancy.png
+```
+
+## Python API
+
+```python
+import numpy as np
+from free_space_analyzer import CameraInfo, DepthFrame, FreeSpaceAnalyzer
+
+depth = np.load("depth.npy")
+camera = CameraInfo.from_horizontal_fov(
+    width=depth.shape[1],
+    height=depth.shape[0],
+    horizontal_fov_deg=90.0,
+    camera_height_m=1.7,
+)
+
+analyzer = FreeSpaceAnalyzer.from_config("configs/default.yaml")
+result = analyzer.analyze(depth=depth, camera=camera)
+
+# 串流整合也可以把 metadata 綁成一個 frame：
+frame = DepthFrame(depth, camera, timestamp_s=0.0, frame_id="capture-0001")
+same_result = analyzer.analyze_frame(frame)
+
+print(result.is_open_space)
+print(result.score)
+print(result.failure_reasons)
+print(result.to_dict())
+```
+
+## Camera JSON
+
+可以直接提供內參：
+
+```json
+{
+  "width": 1280,
+  "height": 720,
+  "fx": 640.0,
+  "fy": 640.0,
+  "cx": 639.5,
+  "cy": 359.5,
+  "camera_height_m": 1.7,
+  "depth_type": "z_depth",
+  "up_vector": [0.0, 1.0, 0.0]
+}
+```
+
+或使用水平 FOV：
+
+```json
+{
+  "width": 1280,
+  "height": 720,
+  "horizontal_fov_deg": 90.0,
+  "camera_height_m": 1.7,
+  "depth_type": "z_depth"
+}
+```
+
+`depth_type`：
+
+- `z_depth`：沿相機光軸 Z 的距離。
+- `radial`：相機中心到表面的射線距離，程式會轉成 Z-depth。
+
+如果引擎輸出的是 0–1 非線性 depth buffer，必須先用引擎的 projection/near/far 參數轉成公尺；不要直接把 0–1 丟進本程式。
+
+## 結果範例
+
+```json
+{
+  "is_open_space": false,
+  "score": 72.4,
+  "largest_free_area_m2": 14.31,
+  "player_reachable_area_m2": 14.31,
+  "largest_free_rectangle": {
+    "width_m": 3.8,
+    "depth_m": 4.2,
+    "area_m2": 15.96,
+    "x_min_m": -1.9,
+    "z_min_m": 0.4,
+    "x_max_m": 1.9,
+    "z_max_m": 4.6
+  },
+  "nearest_obstacle_m": 2.41,
+  "max_clearance_m": 1.5,
+  "obstacle_ratio": 0.08,
+  "unknown_ratio": 0.26,
+  "player_clearance": true,
+  "ground_inlier_ratio": 1.0,
+  "ground_method": "known_height",
+  "observed_points": 10342,
+  "failure_reasons": [
+    "largest_free_area_below_minimum",
+    "required_free_rectangle_not_found"
+  ]
+}
+```
+
+## Debug 圖顏色
+
+- 灰：UNKNOWN
+- 白：FREE
+- 紅：OCCUPIED（已包含安全邊界）
+- 綠框：找到的最大空矩形
+- 藍點：玩家在地面的投影位置
+
+## 調參
+
+所有產品門檻都在 `configs/default.yaml`：
+
+- `ground.mode`：已知高度用 `known_height`，需估計地板才用 `ransac`。
+- `occupancy.resolution_m`：0.1 代表 10 cm；越小越精細但越慢。
+- `occupancy.safety_margin_m`：障礙物外擴半徑。
+- `open_space.min_free_area_m2`：最大連續空地門檻。
+- `open_space.min_rectangle_*`：必要活動矩形。
+- `open_space.max_unknown_ratio`：資訊不足時直接 fail。
+- `open_space.nearby_unknown_is_unsafe`：安全用途建議開啟；單張前視畫面可能因視野外區域而較容易 fail。
+
+預設 `max_unknown_ratio: 0.45` 是給單張約 90° 前視 Depth 的 V1 起點；若之後加入轉頭掃描或多視角融合，建議逐步收緊到 `0.20`。矩形 hard rule 會容許一個 grid cell 的量化誤差，例如 10 cm 網格量到 3.9 m 可視為滿足 4.0 m 邊界，但輸出的原始量測值不會被改寫。
+
+## 接 Unreal / Unity 前要確認
+
+1. Depth 是 Z-depth、radial，還是 normalized nonlinear buffer？
+2. 單位是 cm 還是 m？
+3. 無效/天空深度是 0、1、far plane、Inf 還是 NaN？
+4. 使用的是水平或垂直 FOV？
+5. Camera height 與 `up_vector` 是否正確？
+6. 透明物件、玻璃、遮罩材質是否會寫入 depth？
+7. 哪些物件有 depth 但實際不應算碰撞障礙？
+
+完整不變量、模組責任與 Claude Code 接手規則請看 `ARCHITECTURE.md` 與 `AGENTS.md`。
