@@ -16,6 +16,7 @@ class FreeSpaceMetrics:
     player_reachable_area_m2: float
     largest_rectangle: Rectangle | None
     nearest_obstacle_m: float | None
+    nearest_unsafe_m: float | None
     max_clearance_m: float
     obstacle_ratio: float
     unknown_ratio: float
@@ -52,9 +53,30 @@ def _component_sizes(free: npt.NDArray[np.bool_]) -> tuple[list[int], npt.NDArra
     return sizes, labels
 
 
-def largest_free_rectangle(grid: OccupancyGrid) -> Rectangle | None:
-    """Largest axis-aligned all-FREE rectangle using a histogram stack."""
-    free = grid.cells == GridState.FREE
+def player_reachable_mask(
+    grid: OccupancyGrid,
+    labels: npt.NDArray[np.int32],
+) -> npt.NDArray[np.bool_]:
+    """FREE cells connected to the player origin. Everything else is unreachable."""
+    empty = np.zeros(labels.shape, dtype=bool)
+    origin = grid.world_to_cell(0.0, 0.0)
+    if origin is None:
+        return empty
+    label = int(labels[origin])
+    if label < 0:
+        return empty
+    return labels == label
+
+
+def largest_free_rectangle(
+    grid: OccupancyGrid,
+    mask: npt.NDArray[np.bool_] | None = None,
+) -> Rectangle | None:
+    """Largest axis-aligned all-FREE rectangle using a histogram stack.
+
+    `mask` restricts the search, normally to the player-reachable component.
+    """
+    free = (grid.cells == GridState.FREE) if mask is None else np.asarray(mask, dtype=bool)
     heights = np.zeros(grid.width, dtype=np.int64)
     best_area_cells = 0
     best_bounds: tuple[int, int, int, int] | None = None
@@ -104,21 +126,48 @@ def _distance_to_mask(
     return float(np.sqrt((x - x_m) ** 2 + (z - z_m) ** 2).min())
 
 
-def _max_clearance(grid: OccupancyGrid) -> float:
-    free_locations = np.argwhere(grid.cells == GridState.FREE)
-    blocked_locations = np.argwhere(grid.cells != GridState.FREE)
-    if len(free_locations) == 0:
+def _chamfer_distance_cells(blocked: npt.NDArray[np.bool_]) -> npt.NDArray[np.float64]:
+    """Chamfer 3-4 distance, in cell units, to the nearest blocked cell.
+
+    Two row sweeps, each row vectorized, so the cost is O(cells) instead of the
+    O(free x blocked) pairwise scan this replaces. Cells outside the grid are not
+    treated as blocked, which matches the previous behaviour.
+    """
+    # ponytail: chamfer 3-4 stays within ~6% of true Euclidean distance. Swap in an
+    # exact distance transform if clearance ever becomes a hard requirement.
+    height, width = blocked.shape
+    steps = 3.0 * np.arange(width, dtype=np.float64)
+    unreached = 3.0 * (height + width + 2)
+    distance = np.where(blocked, 0.0, unreached)
+
+    def sweep_row(row: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        row = np.minimum(row, np.minimum.accumulate(row - steps) + steps)
+        backward = np.minimum.accumulate((row + steps)[::-1])[::-1] - steps
+        return np.minimum(row, backward)
+
+    def merge(row: npt.NDArray[np.float64], other: npt.NDArray[np.float64]) -> None:
+        np.minimum(row, other + 3.0, out=row)
+        np.minimum(row[1:], other[:-1] + 4.0, out=row[1:])
+        np.minimum(row[:-1], other[1:] + 4.0, out=row[:-1])
+
+    for row_index in range(height):
+        if row_index:
+            merge(distance[row_index], distance[row_index - 1])
+        distance[row_index] = sweep_row(distance[row_index])
+    for row_index in range(height - 2, -1, -1):
+        merge(distance[row_index], distance[row_index + 1])
+        distance[row_index] = sweep_row(distance[row_index])
+    return distance / 3.0
+
+
+def _max_clearance(grid: OccupancyGrid, reachable: npt.NDArray[np.bool_]) -> float:
+    """Largest distance to blocked space from anywhere the player can actually stand."""
+    if not reachable.any():
         return 0.0
-    if len(blocked_locations) == 0:
+    blocked = grid.cells != GridState.FREE
+    if not blocked.any():
         return float(np.hypot(grid.width_m, grid.depth_m))
-    # Grid sizes are normally around 100x100. Chunking avoids a large NxM allocation.
-    maximum = 0.0
-    for start in range(0, len(free_locations), 512):
-        chunk = free_locations[start : start + 512]
-        delta = chunk[:, None, :] - blocked_locations[None, :, :]
-        squared = np.sum(delta * delta, axis=2)
-        maximum = max(maximum, float(np.sqrt(np.min(squared, axis=1)).max()))
-    return maximum * grid.resolution_m
+    return float(_chamfer_distance_cells(blocked)[reachable].max()) * grid.resolution_m
 
 
 def analyze_free_space(grid: OccupancyGrid, config: OpenSpaceConfig) -> FreeSpaceMetrics:
@@ -130,13 +179,8 @@ def analyze_free_space(grid: OccupancyGrid, config: OpenSpaceConfig) -> FreeSpac
 
     sizes, labels = _component_sizes(free)
     largest_area = (max(sizes) if sizes else 0) * cell_area
-    origin = grid.world_to_cell(0.0, 0.0)
-    reachable_area = 0.0
-    if origin is not None:
-        row, col = origin
-        origin_label = int(labels[row, col])
-        if origin_label >= 0:
-            reachable_area = sizes[origin_label] * cell_area
+    reachable = player_reachable_mask(grid, labels)
+    reachable_area = int(np.count_nonzero(reachable)) * cell_area
 
     nearest_obstacle = _distance_to_mask(grid, occupied, 0.0, 0.0)
     clearance_mask = occupied.copy()
@@ -148,9 +192,12 @@ def analyze_free_space(grid: OccupancyGrid, config: OpenSpaceConfig) -> FreeSpac
     return FreeSpaceMetrics(
         largest_free_area_m2=float(largest_area),
         player_reachable_area_m2=float(reachable_area),
-        largest_rectangle=largest_free_rectangle(grid),
+        # Only reachable space can satisfy a requirement, so the reported rectangle
+        # is the one the player can actually walk into.
+        largest_rectangle=largest_free_rectangle(grid, reachable),
         nearest_obstacle_m=nearest_obstacle,
-        max_clearance_m=_max_clearance(grid),
+        nearest_unsafe_m=nearest_unsafe,
+        max_clearance_m=_max_clearance(grid, reachable),
         obstacle_ratio=float(np.count_nonzero(occupied) / total_cells),
         unknown_ratio=float(np.count_nonzero(unknown) / total_cells),
         player_clearance=player_clearance,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import numpy.typing as npt
 
@@ -11,9 +13,46 @@ class GroundEstimationError(RuntimeError):
     pass
 
 
-def known_height_plane(camera: CameraInfo) -> GroundPlane:
+def ground_candidates(
+    points: npt.ArrayLike,
+    up: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """Points plausibly below the camera. This removes most walls/ceilings."""
+    array = np.asarray(points, dtype=np.float64)
+    if array.ndim != 2 or array.shape[1] != 3:
+        raise GroundEstimationError("points must have shape (N, 3)")
+    below = array[(array @ up) < -0.2]
+    if len(below) > 50_000:
+        below = below[:: max(1, len(below) // 50_000)]
+    return below
+
+
+def plane_support_ratio(
+    points: npt.ArrayLike,
+    plane: GroundPlane,
+    camera: CameraInfo,
+    config: GroundConfig,
+) -> float:
+    """Fraction of ground candidates lying within `distance_tolerance_m` of the plane.
+
+    Reported, not enforced: a low ratio means the assumed camera height or up vector
+    disagrees with what the depth frame actually shows.
+    """
+    below = ground_candidates(points, camera.normalized_up())
+    if len(below) == 0:
+        return 0.0
+    distances = np.abs(below @ plane.normal + plane.d)
+    return float(np.mean(distances <= config.distance_tolerance_m))
+
+
+def known_height_plane(
+    points: npt.ArrayLike,
+    camera: CameraInfo,
+    config: GroundConfig,
+) -> GroundPlane:
     up = camera.normalized_up()
-    return GroundPlane(normal=up, d=camera.camera_height_m, method="known_height")
+    plane = GroundPlane(normal=up, d=camera.camera_height_m, method="known_height")
+    return replace(plane, inlier_ratio=plane_support_ratio(points, plane, camera, config))
 
 
 def estimate_ground_ransac(
@@ -27,13 +66,9 @@ def estimate_ground_ransac(
         raise GroundEstimationError("At least three 3D points are required")
 
     up = camera.normalized_up()
-    # Keep points plausibly below the camera. This removes most walls/ceilings.
-    below = array[(array @ up) < -0.2]
+    below = ground_candidates(array, up)
     if len(below) < 3:
         raise GroundEstimationError("Not enough points below the camera to estimate ground")
-    if len(below) > 50_000:
-        step = max(1, len(below) // 50_000)
-        below = below[::step]
 
     generator = rng or np.random.default_rng(0)
     min_up_dot = float(np.cos(np.deg2rad(config.max_tilt_deg)))
@@ -98,7 +133,7 @@ def estimate_ground(
     config: GroundConfig,
 ) -> GroundPlane:
     if config.mode == "known_height":
-        return known_height_plane(camera)
+        return known_height_plane(points, camera, config)
     if config.mode == "ransac":
         return estimate_ground_ransac(points, camera, config)
     raise ValueError(f"Unsupported ground mode: {config.mode}")

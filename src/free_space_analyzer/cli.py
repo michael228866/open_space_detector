@@ -20,6 +20,8 @@ def camera_from_mapping(data: dict[str, Any], depth_shape: tuple[int, int]) -> C
     if (declared_height, declared_width) != depth_shape:
         raise ValueError("Camera JSON resolution does not match the depth array")
     depth_type = DepthType(data.get("depth_type", DepthType.Z_DEPTH.value))
+    if "camera_height_m" not in data:
+        raise ValueError("Camera JSON is missing: camera_height_m")
     common = {
         "width": declared_width,
         "height": declared_height,

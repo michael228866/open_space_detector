@@ -2,12 +2,13 @@
 
 from .analyzer import FreeSpaceAnalyzer
 from .config import AnalyzerConfig, load_config
+from .ground import GroundEstimationError
 from .models import (
     CameraInfo,
     DepthFrame,
     DepthType,
-    GroundPlane,
     GridState,
+    GroundPlane,
     OccupancyGrid,
     Rectangle,
     SpaceAnalysisResult,
@@ -19,6 +20,7 @@ __all__ = [
     "DepthFrame",
     "DepthType",
     "FreeSpaceAnalyzer",
+    "GroundEstimationError",
     "GroundPlane",
     "GridState",
     "OccupancyGrid",

@@ -9,8 +9,8 @@
 - 已知相機高度或 RANSAC Ground Plane
 - `UNKNOWN / FREE / OCCUPIED` 鳥瞰占用網格
 - ray casting 與障礙物安全邊界
-- 最大連續空地、玩家可達面積
-- 最大軸對齊空矩形
+- 最大連續空地、玩家可達面積（硬性條件只採計玩家走得到的區域）
+- 最大軸對齊空矩形（限制在玩家可達範圍內）
 - 最近障礙物、玩家 clearance、最大 clearance
 - hard rules、0–100 分數與具體失敗原因
 - CLI、JSON 結果與 PNG debug 圖
@@ -108,35 +108,45 @@ print(result.to_dict())
 
 ## 結果範例
 
+`sample_data` 合成場景搭配 `configs/default.yaml` 的實際輸出：
+
 ```json
 {
   "is_open_space": false,
-  "score": 72.4,
-  "largest_free_area_m2": 14.31,
-  "player_reachable_area_m2": 14.31,
+  "score": 73.29,
+  "largest_free_area_m2": 54.19,
+  "player_reachable_area_m2": 54.19,
   "largest_free_rectangle": {
-    "width_m": 3.8,
-    "depth_m": 4.2,
-    "area_m2": 15.96,
-    "x_min_m": -1.9,
-    "z_min_m": 0.4,
-    "x_max_m": 1.9,
-    "z_max_m": 4.6
+    "width_m": 2.7,
+    "depth_m": 4.1,
+    "area_m2": 11.07,
+    "x_min_m": -4.7,
+    "z_min_m": 4.6,
+    "x_max_m": -2.0,
+    "z_max_m": 8.7
   },
-  "nearest_obstacle_m": 2.41,
-  "max_clearance_m": 1.5,
-  "obstacle_ratio": 0.08,
-  "unknown_ratio": 0.26,
-  "player_clearance": true,
-  "ground_inlier_ratio": 1.0,
+  "nearest_obstacle_m": 2.75,
+  "max_clearance_m": 1.8,
+  "obstacle_ratio": 0.1183,
+  "unknown_ratio": 0.3398,
+  "player_clearance": false,
+  "ground_inlier_ratio": 0.62721,
   "ground_method": "known_height",
-  "observed_points": 10342,
+  "observed_points": 8489,
   "failure_reasons": [
-    "largest_free_area_below_minimum",
-    "required_free_rectangle_not_found"
+    "required_free_rectangle_not_found",
+    "player_clearance_below_minimum"
   ]
 }
 ```
+
+兩個容易誤讀的欄位：
+
+- `player_clearance` 在預設設定下會把玩家旁邊的 UNKNOWN 當成不安全。單張前視畫面
+  看不到身體兩側，所以這裡 fail 是正確行為，不是 bug。
+- `ground_inlier_ratio` 現在是實際量測值：below-camera 的點裡有多少落在地面平面
+  的 `distance_tolerance_m` 內。牆面與障礙物表面也算在分母，所以正確設定也不會是
+  1.0；接近 0 才代表 `camera_height_m` 或 `up_vector` 給錯了。
 
 ## Debug 圖顏色
 
@@ -156,7 +166,7 @@ print(result.to_dict())
 - `open_space.min_free_area_m2`：最大連續空地門檻。
 - `open_space.min_rectangle_*`：必要活動矩形。
 - `open_space.max_unknown_ratio`：資訊不足時直接 fail。
-- `open_space.nearby_unknown_is_unsafe`：安全用途建議開啟；單張前視畫面可能因視野外區域而較容易 fail。
+- `open_space.nearby_unknown_is_unsafe`：預設 `true`。單張 90° 前視畫面的側邊本來就沒有觀測，玩家旁邊的 UNKNOWN 會直接讓 clearance fail，這是刻意的安全語意；只有離線診斷才建議關掉。
 
 預設 `max_unknown_ratio: 0.45` 是給單張約 90° 前視 Depth 的 V1 起點；若之後加入轉頭掃描或多視角融合，建議逐步收緊到 `0.20`。矩形 hard rule 會容許一個 grid cell 的量化誤差，例如 10 cm 網格量到 3.9 m 可視為滿足 4.0 m 邊界，但輸出的原始量測值不會被改寫。
 

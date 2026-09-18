@@ -32,7 +32,10 @@ def _bresenham(row0: int, col0: int, row1: int, col1: int) -> list[tuple[int, in
             row += sy
 
 
-def _unique_cells(rows: npt.NDArray[np.int64], cols: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
+def _unique_cells(
+    rows: npt.NDArray[np.int64],
+    cols: npt.NDArray[np.int64],
+) -> npt.NDArray[np.int64]:
     if len(rows) == 0:
         return np.empty((0, 2), dtype=np.int64)
     return np.unique(np.column_stack((rows, cols)), axis=0)
@@ -127,12 +130,13 @@ def build_occupancy_grid(
             line = _bresenham(origin_row, origin_col, int(endpoint_row), int(endpoint_col))
             if len(line) > 1:
                 rr, cc = np.asarray(line[:-1], dtype=np.int64).T
-                not_occupied = cells[rr, cc] != GridState.OCCUPIED
-                cells[rr[not_occupied], cc[not_occupied]] = GridState.FREE
+                cells[rr, cc] = GridState.FREE
     else:
         if len(floor_cells):
             cells[floor_cells[:, 0], floor_cells[:, 1]] = GridState.FREE
 
+    # Occupied evidence wins over free evidence: endpoints are written after
+    # every free ray, so a cell touched by both ends up OCCUPIED.
     if len(obstacle_cells):
         cells[obstacle_cells[:, 0], obstacle_cells[:, 1]] = GridState.OCCUPIED
     cells[origin_row, origin_col] = GridState.FREE

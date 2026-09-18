@@ -35,7 +35,9 @@ def score_space(
             _threshold_score(rectangle.depth_m, thresholds.min_rectangle_width_m),
         )
         rectangle_score = max(direct, rotated)
-    clearance_value = metrics.nearest_obstacle_m
+    # Scored against the nearest unsafe cell, not the nearest obstacle: when
+    # UNKNOWN counts as unsafe, unobserved space must not earn a full score.
+    clearance_value = metrics.nearest_unsafe_m
     if clearance_value is None:
         clearance_score = 100.0
     else:
@@ -44,7 +46,7 @@ def score_space(
         )
     values = {
         "free_area_weight": _threshold_score(
-            metrics.largest_free_area_m2, thresholds.min_free_area_m2
+            metrics.player_reachable_area_m2, thresholds.min_free_area_m2
         ),
         "rectangle_weight": rectangle_score,
         "clearance_weight": clearance_score,
@@ -66,7 +68,9 @@ def evaluate_requirements(
     measurement_tolerance_m: float = 0.0,
 ) -> tuple[bool, tuple[str, ...]]:
     reasons: list[str] = []
-    if metrics.largest_free_area_m2 < thresholds.min_free_area_m2:
+    # Space the player cannot walk into never satisfies a requirement, so both the
+    # area and the rectangle come from the reachable component.
+    if metrics.player_reachable_area_m2 < thresholds.min_free_area_m2:
         reasons.append("largest_free_area_below_minimum")
     rectangle = metrics.largest_rectangle
     rectangle_pass = False

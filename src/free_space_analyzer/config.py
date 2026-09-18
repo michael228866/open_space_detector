@@ -89,6 +89,16 @@ class AnalyzerConfig:
             raise ValueError("min obstacle height cannot be negative")
         if self.occupancy.max_obstacle_height_m <= self.occupancy.min_obstacle_height_m:
             raise ValueError("max obstacle height must exceed min obstacle height")
+        if self.occupancy.safety_margin_m < 0:
+            raise ValueError("safety_margin_m cannot be negative")
+        for name in (
+            "min_free_area_m2",
+            "min_rectangle_width_m",
+            "min_rectangle_depth_m",
+            "min_player_clearance_m",
+        ):
+            if getattr(self.open_space, name) < 0:
+                raise ValueError(f"{name} cannot be negative")
         for name in ("max_obstacle_ratio", "max_unknown_ratio"):
             value = getattr(self.open_space, name)
             if not 0 <= value <= 1:

@@ -28,7 +28,9 @@ open_space:
   # A single 90-degree view naturally leaves side areas unobserved. Tighten to
   # 0.20 after multi-view fusion is added.
   max_unknown_ratio: 0.45
-  nearby_unknown_is_unsafe: false
+  # UNKNOWN next to the player is unsafe: a single forward view cannot prove the
+  # sides are clear. Set to false only for offline diagnostics, never for safety.
+  nearby_unknown_is_unsafe: true
 
 scoring:
   free_area_weight: 0.30

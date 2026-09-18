@@ -23,7 +23,7 @@ def render_occupancy(
     colors[grid.cells == GridState.OCCUPIED] = (220, 60, 65)
     # Far space is shown at the top of the image.
     colors = np.flipud(colors)
-    image = Image.fromarray(colors, mode="RGB").resize(
+    image = Image.fromarray(colors).resize(
         (grid.width * scale, grid.height * scale),
         resample=Image.Resampling.NEAREST,
     )

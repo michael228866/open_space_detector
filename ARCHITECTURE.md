@@ -18,7 +18,11 @@ it does not classify a screenshot as "open" with a black-box model.
   - `UNKNOWN = -1`: no trustworthy visibility evidence.
   - `FREE = 0`: a ray passed through or ended on ground.
   - `OCCUPIED = 1`: a return lies in the configured obstacle-height band.
-- UNKNOWN must never be silently treated as FREE.
+- UNKNOWN must never be silently treated as FREE. `nearby_unknown_is_unsafe`
+  ships enabled, so unobserved space next to the player fails clearance instead
+  of scoring as clear.
+- Only the FREE component connected to the player origin can satisfy a
+  requirement. Space behind a wall is measured and reported, never credited.
 - Public distances use metres and areas use square metres.
 
 ## Pipeline
@@ -69,6 +73,14 @@ hard requirements + 0..100 diagnostic score
 `known_height` is the default because an engine normally knows camera height and
 orientation. Its plane is deterministic and should be preferred in production.
 
+Both modes report a measured `inlier_ratio`: the fraction of below-camera ground
+candidates lying within `distance_tolerance_m` of the returned plane. For
+`known_height` this is diagnostic only and no threshold is enforced yet, because
+the candidate set also contains walls and obstacle faces, so a correct setup does
+not reach 1.0. A value near zero means the assumed `camera_height_m` or
+`up_vector` disagrees with the depth frame. Validate a production threshold
+against real engine captures before turning it into a hard condition.
+
 `ransac` is provided for captures where the camera-to-ground relationship is not
 trusted. Candidates are restricted to points below the camera, plane normals must
 stay within `max_tilt_deg` of `CameraInfo.up_vector`, and the plane distance must be
@@ -92,8 +104,9 @@ points do not contribute evidence. Unsupported cells remain unknown.
 
 `is_open_space` requires every configured hard condition:
 
-1. largest connected free area;
-2. an axis-aligned free rectangle, allowing width/depth rotation;
+1. free area of the player-reachable component;
+2. an axis-aligned free rectangle inside that component, allowing width/depth
+   rotation;
 3. player clearance;
 4. maximum obstacle ratio;
 5. maximum unknown ratio.
@@ -119,6 +132,11 @@ captured depth frames.
 ## Known V1 limits
 
 - One forward grid is analyzed; multi-view temporal fusion is not implemented.
+- Depth returns outside the grid are dropped rather than clipped to the grid
+  boundary, so `unknown_ratio` reads slightly high near the far edge. Tracked as
+  a separate change; it needs a fixture before the ray policy is touched.
+- `max_clearance_m` uses a chamfer 3-4 distance transform, measured at -5.7% to
+  +5.4% against exact Euclidean distance. It is diagnostic; no hard rule reads it.
 - The maximum free rectangle is aligned with the grid axes.
 - Stairs, holes, glass and mirrors require engine metadata or an RGB/depth policy.
 - Dynamic versus static obstacles are not semantically distinguished.

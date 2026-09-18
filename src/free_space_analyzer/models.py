@@ -89,7 +89,9 @@ class DepthFrame:
         array = np.asarray(self.data, dtype=np.float32)
         expected = (self.camera.height, self.camera.width)
         if array.shape != expected:
-            raise ValueError(f"Depth shape {array.shape} does not match camera resolution {expected}")
+            raise ValueError(
+                f"Depth shape {array.shape} does not match camera resolution {expected}"
+            )
         object.__setattr__(self, "data", array)
 
 
