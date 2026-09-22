@@ -73,8 +73,10 @@ def build_occupancy_grid(
     occupancy_config: OccupancyConfig,
     ground_config: GroundConfig,
     player_offset_m: tuple[float, float] = (0.0, 0.0),
+    camera_offset_m: tuple[float, float] = (0.0, 0.0),
+    z_min_m: float = 0.0,
 ) -> OccupancyGrid:
-    """Create a forward-facing ground grid from a point cloud.
+    """Create a ground grid from a point cloud.
 
     Floor returns mark their ray and endpoint FREE. Obstacle returns mark the
     ray FREE and endpoint OCCUPIED. Cells with no evidence remain UNKNOWN.
@@ -82,6 +84,11 @@ def build_occupancy_grid(
     Rays always start at the camera, which is where visibility actually
     originates. `player_offset_m` only says where the player stands, so a
     third-person rig can drop the returns from the player's own body.
+
+    The defaults give the single-view convention: camera at the origin, grid
+    covering z >= 0 in front of it. `camera_offset_m` and `z_min_m` exist so
+    several views can be expressed in one shared frame and merged; a fused grid
+    is normally centred on the player, so it needs a negative `z_min_m`.
     """
     rows = int(math.ceil(occupancy_config.depth_m / occupancy_config.resolution_m))
     cols = int(math.ceil(occupancy_config.width_m / occupancy_config.resolution_m))
@@ -91,7 +98,7 @@ def build_occupancy_grid(
         cells=cells,
         resolution_m=occupancy_config.resolution_m,
         x_min_m=x_min,
-        z_min_m=0.0,
+        z_min_m=z_min_m,
         observed_points=0,
     )
 
@@ -127,9 +134,9 @@ def build_occupancy_grid(
     floor_cells = _unique_cells(cell_rows[floor], cell_cols[floor])
     obstacle_cells = _unique_cells(cell_rows[obstacle], cell_cols[obstacle])
 
-    origin = grid.world_to_cell(0.0, 0.0)
+    origin = grid.world_to_cell(*camera_offset_m)
     if origin is None:
-        raise RuntimeError("Camera origin is outside the occupancy grid")
+        raise RuntimeError(f"camera_offset_m {camera_offset_m} is outside the occupancy grid")
     origin_row, origin_col = origin
     player_cell = grid.world_to_cell(player_x, player_z)
     if player_cell is None:

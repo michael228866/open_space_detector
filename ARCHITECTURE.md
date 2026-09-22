@@ -17,7 +17,9 @@ it does not classify a screenshot as "open" with a black-box model.
 - The player projects to `CameraInfo.player_offset_m`, an `(x, z)` pair that is
   `(0, 0)` for a first-person rig and in front of the camera for a third-person
   one. Reachability, clearance and the debug marker are all measured from it.
-- Ground coordinates are `X right`, `Z forward`; the grid covers only `z >= 0`.
+- Ground coordinates are `X right`, `Z forward`. A single-view grid covers only
+  `z >= 0`, in front of its camera. A fused grid is centred on the player and
+  covers `z < 0` too, with each view contributing rays from its own camera.
 - Occupancy states are immutable in meaning:
   - `UNKNOWN = -1`: no trustworthy visibility evidence.
   - `FREE = 0`: a ray passed through or ended on ground.
@@ -141,7 +143,11 @@ captured depth frames.
 
 ## Known V1 limits
 
-- One forward grid is analyzed; multi-view temporal fusion is not implemented.
+- `build_occupancy_grid` fuses several views when they are expressed in one
+  shared frame: pass each view's `camera_offset_m` and a negative `z_min_m`.
+  Evidence merges as OCCUPIED over FREE over UNKNOWN, so an obstacle only one
+  camera saw survives and unobserved cells never pass as free. Temporal fusion
+  across moving cameras is still not implemented.
 - Depth returns outside the grid are dropped rather than clipped to the grid
   boundary, so `unknown_ratio` reads slightly high near the far edge. Tracked as
   a separate change; it needs a fixture before the ray policy is touched.

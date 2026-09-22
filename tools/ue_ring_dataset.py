@@ -43,8 +43,12 @@ from PIL import Image
 
 from free_space_analyzer import AnalyzerConfig, CameraInfo, FreeSpaceAnalyzer, load_config
 from free_space_analyzer.depth import preprocess_depth
+from free_space_analyzer.free_space import analyze_free_space
 from free_space_analyzer.geometry import depth_to_point_cloud, points_to_ground_coordinates
 from free_space_analyzer.ground import known_height_plane
+from free_space_analyzer.models import GridState, GroundPlane, OccupancyGrid
+from free_space_analyzer.occupancy import build_occupancy_grid
+from free_space_analyzer.scoring import evaluate_requirements, score_space
 from free_space_analyzer.visualization import render_occupancy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -205,6 +209,79 @@ def load_capture(
     )
 
 
+def _world_basis(camera_json: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Camera ground position and its forward/right axes, all in world metres."""
+    yaw = math.radians(camera_json["ue_rotation_pyr"][1])
+    position = np.asarray(camera_json["ue_location_cm"], dtype=np.float64)[:2] / 100.0
+    forward = np.array([math.cos(yaw), math.sin(yaw)])
+    right = np.array([-math.sin(yaw), math.cos(yaw)])
+    return position, forward, right
+
+
+def fuse_views(
+    folders: list[Path],
+    config: AnalyzerConfig,
+    frame: int = 0,
+    motion_frame: int | None = 12,
+) -> tuple[OccupancyGrid, int]:
+    """Merge every view of one spot into a single player-centred grid.
+
+    A lone view cannot see past the character it is judging, and it cannot see
+    outside its own frustum. Views around a ring fill in each other's blind
+    spots, so the fused grid is the honest picture of the spot.
+
+    Evidence merges the same way it does inside one grid: OCCUPIED beats FREE
+    beats UNKNOWN. That keeps an obstacle only one camera saw, and never lets a
+    cell nobody observed pass as free.
+    """
+    views = []
+    for folder in folders:
+        capture = load_capture(folder, frame, config=config, motion_frame=motion_frame)
+        camera_json = json.loads((folder / f"{frame:04d}.camera.json").read_text(encoding="utf-8"))
+        position, forward, right = _world_basis(camera_json)
+        lateral, ahead = capture.camera.player_offset_m
+        player = position + right * lateral + forward * ahead
+        views.append((capture, position, forward, right, player))
+    if not views:
+        raise ValueError("no views to fuse")
+
+    # Each view sees the character from its own side, so the ring mean cancels
+    # the front-surface bias that survives in any single estimate.
+    player_world = np.mean([view[4] for view in views], axis=0)
+    flat = GroundPlane(normal=np.array([0.0, 1.0, 0.0]), d=0.0)
+    half_depth = -math.ceil(config.occupancy.depth_m / config.occupancy.resolution_m) / 2.0
+    z_min = half_depth * config.occupancy.resolution_m
+
+    merged: OccupancyGrid | None = None
+    observed = 0
+    for capture, position, forward, right, _ in views:
+        depth = preprocess_depth(capture.depth_m, capture.camera, config.depth)
+        points = depth_to_point_cloud(depth, capture.camera, stride=config.depth.sample_stride)
+        plane = known_height_plane(points, capture.camera, config.ground)
+        x, z, height = points_to_ground_coordinates(points, plane)
+        # This view's ground coordinates into the shared player-centred frame.
+        world = position + np.outer(x, right) + np.outer(z, forward) - player_world
+        grid = build_occupancy_grid(
+            np.column_stack((world[:, 0], height, world[:, 1])),
+            flat,
+            config.occupancy,
+            config.ground,
+            player_offset_m=(0.0, 0.0),
+            camera_offset_m=tuple(position - player_world),
+            z_min_m=z_min,
+        )
+        observed += grid.observed_points
+        if merged is None:
+            merged = grid
+            continue
+        free = (grid.cells == GridState.FREE) & (merged.cells == GridState.UNKNOWN)
+        merged.cells[free] = GridState.FREE
+        merged.cells[grid.cells == GridState.OCCUPIED] = GridState.OCCUPIED
+    assert merged is not None
+    merged.observed_points = observed
+    return merged, len(views)
+
+
 def capture_folders(label_dir: Path) -> list[Path]:
     return sorted(p for p in label_dir.iterdir() if p.is_dir() and any(p.glob("*.depth.png")))
 
@@ -222,6 +299,11 @@ def main() -> int:
         help="second frame used to find the character; -1 keeps the metadata position",
     )
     parser.add_argument("--debug-dir", type=Path, help="write one occupancy PNG per camera")
+    parser.add_argument(
+        "--fuse",
+        action="store_true",
+        help="merge every view of a spot into one player-centred grid",
+    )
     parser.add_argument(
         "--subject-offset-cm",
         type=float,
@@ -242,6 +324,31 @@ def main() -> int:
             continue
         metadata = json.loads((label / "render_metadata.json").read_text(encoding="utf-8"))
         print(f"\n{label}  ({metadata['combo_id']}, point {metadata['point_id']})")
+        if args.fuse:
+            grid, views = fuse_views(
+                folders,
+                analyzer.config,
+                args.frame,
+                None if args.motion_frame < 0 else args.motion_frame,
+            )
+            metrics = analyze_free_space(grid, analyzer.config.open_space)
+            is_open, reasons = evaluate_requirements(
+                metrics, analyzer.config.open_space, grid.resolution_m
+            )
+            score = score_space(metrics, analyzer.config.open_space, analyzer.config.scoring)
+            print(
+                f"  fused {views} views -> {'OPEN' if is_open else 'no':<4} "
+                f"score={score:6.2f}  reach={metrics.player_reachable_area_m2:6.2f} m2  "
+                f"unk={metrics.unknown_ratio:.2f}  clearance={metrics.max_clearance_m:.2f} m  "
+                + ", ".join(r.replace("_", " ") for r in reasons)
+            )
+            if args.debug_dir:
+                render_occupancy(
+                    grid,
+                    args.debug_dir / f"{label.name}-fused.png",
+                    rectangle=metrics.largest_rectangle,
+                )
+            continue
         verdicts = []
         for folder in folders:
             capture = load_capture(
