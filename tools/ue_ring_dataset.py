@@ -1,7 +1,15 @@
-"""Adapter and batch runner for Unreal bullet-time ring captures.
+"""Decide whether a captured point is a good activity spot.
+
+Point it at one directory per candidate point. Every camera of that point is
+fused into a single player-centred grid and judged once, because that is the
+question being asked: is this spot open, not what does camera 7 think. Use
+`--per-view` when a point needs explaining rather than deciding.
 
 Engine-specific conversion lives here, not in the core package. One capture
 folder is one camera on the ring; every frame in it shares the same pose.
+
+Cost is linear at roughly 0.19 s per view, so a 68-camera point takes about
+13 s and 230 MB. `occupancy._bresenham` is the hot spot if that ever matters.
 
 Layout::
 
@@ -234,6 +242,8 @@ def fuse_views(
     beats UNKNOWN. That keeps an obstacle only one camera saw, and never lets a
     cell nobody observed pass as free.
     """
+    # ponytail: every view's depth is held at once, about 3 MB each. Fine at 68
+    # cameras; stream in two passes if a rig ever gets much larger.
     views = []
     for folder in folders:
         capture = load_capture(folder, frame, config=config, motion_frame=motion_frame)
@@ -300,9 +310,9 @@ def main() -> int:
     )
     parser.add_argument("--debug-dir", type=Path, help="write one occupancy PNG per camera")
     parser.add_argument(
-        "--fuse",
+        "--per-view",
         action="store_true",
-        help="merge every view of a spot into one player-centred grid",
+        help="report each camera separately instead of fusing them (diagnostic)",
     )
     parser.add_argument(
         "--subject-offset-cm",
@@ -324,7 +334,7 @@ def main() -> int:
             continue
         metadata = json.loads((label / "render_metadata.json").read_text(encoding="utf-8"))
         print(f"\n{label}  ({metadata['combo_id']}, point {metadata['point_id']})")
-        if args.fuse:
+        if not args.per_view:
             grid, views = fuse_views(
                 folders,
                 analyzer.config,

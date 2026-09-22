@@ -180,6 +180,22 @@ print(result.to_dict())
 
 預設 `max_unknown_ratio: 0.45` 是給單張約 90° 前視 Depth 的 V1 起點；若之後加入轉頭掃描或多視角融合，建議逐步收緊到 `0.20`。矩形 hard rule 會容許一個 grid cell 的量化誤差，例如 10 cm 網格量到 3.9 m 可視為滿足 4.0 m 邊界，但輸出的原始量測值不會被改寫。
 
+## 評估擷取點（多機位）
+
+一個候選點一個資料夾，裡面每支相機一個子資料夾。預設會把所有視角融合成一張
+以玩家為中心的網格，然後給一個判定：
+
+```bash
+python tools/ue_ring_dataset.py <point_dir> --debug-dir output/dbg
+python tools/ue_ring_dataset.py <point_dir> --per-view   # 逐機位診斷
+```
+
+單一視角看不到角色背後，也看不出自己視錐之外，所以**不要用單張判定**。實測同一
+個開闊點：單視角 12 次全部 fail（unknown 0.44–0.77），融合後 unknown 降到 0.01
+並正確判為 open。視角數約 8–12 就收斂，再多是餘裕。
+
+成本是線性的，約 0.19 秒/視角 —— 68 支相機的點約 13 秒、230 MB。
+
 ## 接 Unreal / Unity 前要確認
 
 1. Depth 是 Z-depth、radial，還是 normalized nonlinear buffer？
