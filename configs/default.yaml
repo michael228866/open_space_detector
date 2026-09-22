@@ -18,6 +18,10 @@ occupancy:
   max_obstacle_height_m: 2.20
   safety_margin_m: 0.25
   raycast_free_space: true
+  # Third-person rigs see the player's own body. Set to the body radius (~0.35)
+  # so the character is not judged as an obstacle standing on the spot being
+  # measured. 0 disables the exclusion, which is correct for a first-person rig.
+  player_radius_m: 0.0
 
 open_space:
   min_free_area_m2: 16.0

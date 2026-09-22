@@ -72,11 +72,16 @@ def build_occupancy_grid(
     plane: GroundPlane,
     occupancy_config: OccupancyConfig,
     ground_config: GroundConfig,
+    player_offset_m: tuple[float, float] = (0.0, 0.0),
 ) -> OccupancyGrid:
     """Create a forward-facing ground grid from a point cloud.
 
     Floor returns mark their ray and endpoint FREE. Obstacle returns mark the
     ray FREE and endpoint OCCUPIED. Cells with no evidence remain UNKNOWN.
+
+    Rays always start at the camera, which is where visibility actually
+    originates. `player_offset_m` only says where the player stands, so a
+    third-person rig can drop the returns from the player's own body.
     """
     rows = int(math.ceil(occupancy_config.depth_m / occupancy_config.resolution_m))
     cols = int(math.ceil(occupancy_config.width_m / occupancy_config.resolution_m))
@@ -106,6 +111,12 @@ def build_occupancy_grid(
         & (height >= occupancy_config.min_obstacle_height_m)
         & (height <= occupancy_config.max_obstacle_height_m)
     )
+    player_x, player_z = player_offset_m
+    if occupancy_config.player_radius_m > 0:
+        # The player's own body is a depth return standing exactly where the
+        # space is being judged. It is not an obstacle to the player.
+        body = ((x - player_x) ** 2 + (z - player_z) ** 2) <= occupancy_config.player_radius_m**2
+        obstacle = obstacle & ~body
     useful = floor | obstacle
     grid.observed_points = int(np.count_nonzero(useful))
     if grid.observed_points == 0:
@@ -118,8 +129,14 @@ def build_occupancy_grid(
 
     origin = grid.world_to_cell(0.0, 0.0)
     if origin is None:
-        raise RuntimeError("Player origin is outside the occupancy grid")
+        raise RuntimeError("Camera origin is outside the occupancy grid")
     origin_row, origin_col = origin
+    player_cell = grid.world_to_cell(player_x, player_z)
+    if player_cell is None:
+        raise RuntimeError(
+            f"player_offset_m {player_offset_m} is outside the occupancy grid; "
+            "widen occupancy.width_m/depth_m or fix the rig calibration"
+        )
 
     if occupancy_config.raycast_free_space:
         for endpoint_row, endpoint_col in floor_cells:
@@ -140,6 +157,11 @@ def build_occupancy_grid(
     if len(obstacle_cells):
         cells[obstacle_cells[:, 0], obstacle_cells[:, 1]] = GridState.OCCUPIED
     cells[origin_row, origin_col] = GridState.FREE
+    if occupancy_config.player_radius_m > 0:
+        # Only because the body returns were dropped above: the player stands
+        # here, so the cell is walkable. Without the exclusion the evidence is
+        # left alone, so a real obstacle at that spot still wins.
+        cells[player_cell] = GridState.FREE
 
     radius_cells = int(math.ceil(occupancy_config.safety_margin_m / grid.resolution_m))
     _dilate_occupied(cells, radius_cells)

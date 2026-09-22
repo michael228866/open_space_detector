@@ -83,9 +83,17 @@ print(result.to_dict())
   "cy": 359.5,
   "camera_height_m": 1.7,
   "depth_type": "z_depth",
-  "up_vector": [0.0, 1.0, 0.0]
+  "up_vector": [0.0, 1.0, 0.0],
+  "player_offset_m": [0.0, 0.0]
 }
 ```
+
+`player_offset_m` 是玩家在地面座標的 `(x, z)`，相對於相機的地面投影：
+
+- 第一人稱：`[0.0, 0.0]`（預設）。
+- 第三人稱：角色在相機前方，例如 `[0.0, 3.2]`。跟隨相機的 rig 固定時這是一個
+  常數，校準一次即可，不需要逐張匯出。射線起點仍然是相機；改變的只有
+  「從哪裡評估空間」：可達區、clearance、debug 藍點。
 
 或使用水平 FOV：
 
@@ -163,6 +171,8 @@ print(result.to_dict())
 - `ground.mode`：已知高度用 `known_height`，需估計地板才用 `ransac`。
 - `occupancy.resolution_m`：0.1 代表 10 cm；越小越精細但越慢。
 - `occupancy.safety_margin_m`：障礙物外擴半徑。
+- `occupancy.player_radius_m`：第三人稱必設（約 0.35）。角色自己的 depth 會落在
+  要評估的位置上，不排除掉就等於腳下永遠站著一個假障礙物。第一人稱維持 0。
 - `open_space.min_free_area_m2`：最大連續空地門檻。
 - `open_space.min_rectangle_*`：必要活動矩形。
 - `open_space.max_unknown_ratio`：資訊不足時直接 fail。

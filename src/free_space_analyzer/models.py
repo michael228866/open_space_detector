@@ -35,6 +35,10 @@ class CameraInfo:
     camera_height_m: float
     depth_type: DepthType = DepthType.Z_DEPTH
     up_vector: tuple[float, float, float] = (0.0, 1.0, 0.0)
+    # Ground-coordinate (x, z) of the player relative to the camera's ground
+    # projection. (0, 0) is a first-person rig; a third-person rig puts the
+    # player in front of the camera, e.g. (0.0, 3.2).
+    player_offset_m: tuple[float, float] = (0.0, 0.0)
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
@@ -46,6 +50,9 @@ class CameraInfo:
         up = np.asarray(self.up_vector, dtype=np.float64)
         if up.shape != (3,) or not np.all(np.isfinite(up)) or np.linalg.norm(up) < 1e-9:
             raise ValueError("up_vector must be a finite non-zero 3-vector")
+        offset = np.asarray(self.player_offset_m, dtype=np.float64)
+        if offset.shape != (2,) or not np.all(np.isfinite(offset)):
+            raise ValueError("player_offset_m must be a finite (x, z) pair in metres")
 
     @classmethod
     def from_horizontal_fov(
@@ -56,6 +63,7 @@ class CameraInfo:
         camera_height_m: float,
         depth_type: DepthType = DepthType.Z_DEPTH,
         up_vector: tuple[float, float, float] = (0.0, 1.0, 0.0),
+        player_offset_m: tuple[float, float] = (0.0, 0.0),
     ) -> CameraInfo:
         if not 1.0 < horizontal_fov_deg < 179.0:
             raise ValueError("horizontal_fov_deg must be between 1 and 179 degrees")
@@ -71,6 +79,7 @@ class CameraInfo:
             camera_height_m=camera_height_m,
             depth_type=depth_type,
             up_vector=up_vector,
+            player_offset_m=player_offset_m,
         )
 
     def normalized_up(self) -> npt.NDArray[np.float64]:

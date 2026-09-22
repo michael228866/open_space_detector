@@ -13,6 +13,7 @@ def render_occupancy(
     output_path: str | Path,
     rectangle: Rectangle | None = None,
     scale: int = 6,
+    player_xz: tuple[float, float] = (0.0, 0.0),
 ) -> Path:
     """Write a top-down PNG: grey unknown, white free, red occupied."""
     if scale < 1:
@@ -39,7 +40,14 @@ def render_occupancy(
         right, top = pixel_for_world(rectangle.x_max_m, rectangle.z_max_m)
         draw.rectangle((left, top, right, bottom), outline=(40, 180, 90), width=max(2, scale // 2))
 
-    player_x, player_y = pixel_for_world(0.0, 0.0)
+    if player_xz != (0.0, 0.0):
+        # Third-person rig: mark the camera separately from the player.
+        camera_x, camera_y = pixel_for_world(0.0, 0.0)
+        tick = max(3, scale)
+        amber = (250, 190, 60)
+        draw.line((camera_x - tick, camera_y, camera_x + tick, camera_y), fill=amber, width=2)
+        draw.line((camera_x, camera_y - tick, camera_x, camera_y + tick), fill=amber, width=2)
+    player_x, player_y = pixel_for_world(*player_xz)
     radius = max(3, scale)
     draw.ellipse(
         (player_x - radius, player_y - radius, player_x + radius, player_y + radius),

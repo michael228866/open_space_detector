@@ -34,6 +34,7 @@ class OccupancyConfig:
     max_obstacle_height_m: float = 2.20
     safety_margin_m: float = 0.25
     raycast_free_space: bool = True
+    player_radius_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,8 @@ class AnalyzerConfig:
             raise ValueError("max obstacle height must exceed min obstacle height")
         if self.occupancy.safety_margin_m < 0:
             raise ValueError("safety_margin_m cannot be negative")
+        if self.occupancy.player_radius_m < 0:
+            raise ValueError("player_radius_m cannot be negative")
         for name in (
             "min_free_area_m2",
             "min_rectangle_width_m",

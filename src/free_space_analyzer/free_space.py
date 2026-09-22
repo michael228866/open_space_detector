@@ -56,10 +56,11 @@ def _component_sizes(free: npt.NDArray[np.bool_]) -> tuple[list[int], npt.NDArra
 def player_reachable_mask(
     grid: OccupancyGrid,
     labels: npt.NDArray[np.int32],
+    player_xz: tuple[float, float] = (0.0, 0.0),
 ) -> npt.NDArray[np.bool_]:
-    """FREE cells connected to the player origin. Everything else is unreachable."""
+    """FREE cells connected to where the player stands. Everything else is unreachable."""
     empty = np.zeros(labels.shape, dtype=bool)
-    origin = grid.world_to_cell(0.0, 0.0)
+    origin = grid.world_to_cell(*player_xz)
     if origin is None:
         return empty
     label = int(labels[origin])
@@ -170,7 +171,12 @@ def _max_clearance(grid: OccupancyGrid, reachable: npt.NDArray[np.bool_]) -> flo
     return float(_chamfer_distance_cells(blocked)[reachable].max()) * grid.resolution_m
 
 
-def analyze_free_space(grid: OccupancyGrid, config: OpenSpaceConfig) -> FreeSpaceMetrics:
+def analyze_free_space(
+    grid: OccupancyGrid,
+    config: OpenSpaceConfig,
+    player_xz: tuple[float, float] = (0.0, 0.0),
+) -> FreeSpaceMetrics:
+    """Every player-relative metric is measured from `player_xz`, not from the camera."""
     free = grid.cells == GridState.FREE
     occupied = grid.cells == GridState.OCCUPIED
     unknown = grid.cells == GridState.UNKNOWN
@@ -179,14 +185,14 @@ def analyze_free_space(grid: OccupancyGrid, config: OpenSpaceConfig) -> FreeSpac
 
     sizes, labels = _component_sizes(free)
     largest_area = (max(sizes) if sizes else 0) * cell_area
-    reachable = player_reachable_mask(grid, labels)
+    reachable = player_reachable_mask(grid, labels, player_xz)
     reachable_area = int(np.count_nonzero(reachable)) * cell_area
 
-    nearest_obstacle = _distance_to_mask(grid, occupied, 0.0, 0.0)
+    nearest_obstacle = _distance_to_mask(grid, occupied, *player_xz)
     clearance_mask = occupied.copy()
     if config.nearby_unknown_is_unsafe:
         clearance_mask |= unknown
-    nearest_unsafe = _distance_to_mask(grid, clearance_mask, 0.0, 0.0)
+    nearest_unsafe = _distance_to_mask(grid, clearance_mask, *player_xz)
     player_clearance = nearest_unsafe is None or nearest_unsafe >= config.min_player_clearance_m
 
     return FreeSpaceMetrics(

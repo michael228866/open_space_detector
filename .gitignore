@@ -7,4 +7,5 @@ __pycache__/
 .ruff_cache/
 output/
 sample_clear/
-
+bad/*
+good/*

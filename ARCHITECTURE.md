@@ -12,7 +12,11 @@ it does not classify a screenshot as "open" with a black-box model.
 - `z_depth` means distance along the optical Z axis.
 - `radial` means Euclidean distance along the pixel ray and is converted first.
 - Camera coordinates are `X right`, `Y up`, `Z forward`.
-- The player/camera projects to ground coordinate `(x=0, z=0)`.
+- The camera projects to ground coordinate `(x=0, z=0)`. Visibility rays always
+  start there, because that is where seeing actually happens.
+- The player projects to `CameraInfo.player_offset_m`, an `(x, z)` pair that is
+  `(0, 0)` for a first-person rig and in front of the camera for a third-person
+  one. Reachability, clearance and the debug marker are all measured from it.
 - Ground coordinates are `X right`, `Z forward`; the grid covers only `z >= 0`.
 - Occupancy states are immutable in meaning:
   - `UNKNOWN = -1`: no trustworthy visibility evidence.
@@ -99,6 +103,12 @@ Finally, occupied cells are dilated by `safety_margin_m`.
 
 Points below the ground tolerance, points above the obstacle band and out-of-grid
 points do not contribute evidence. Unsupported cells remain unknown.
+
+A third-person rig sees the player's own body, which would otherwise be an
+obstacle standing on the exact spot being judged. `occupancy.player_radius_m`
+drops obstacle evidence within that radius of `player_offset_m`, and only then
+seeds the player cell FREE. With the exclusion disabled the evidence is left
+alone, so a real obstacle at that spot still wins.
 
 ## Decision semantics
 

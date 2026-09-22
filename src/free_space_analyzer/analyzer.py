@@ -41,9 +41,10 @@ class FreeSpaceAnalyzer:
             plane,
             self.config.occupancy,
             self.config.ground,
+            camera.player_offset_m,
         )
         self.last_occupancy_grid = grid
-        metrics = analyze_free_space(grid, self.config.open_space)
+        metrics = analyze_free_space(grid, self.config.open_space, camera.player_offset_m)
         is_open, reasons = evaluate_requirements(
             metrics,
             self.config.open_space,

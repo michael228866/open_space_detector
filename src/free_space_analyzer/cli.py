@@ -28,6 +28,7 @@ def camera_from_mapping(data: dict[str, Any], depth_shape: tuple[int, int]) -> C
         "camera_height_m": float(data["camera_height_m"]),
         "depth_type": depth_type,
         "up_vector": tuple(data.get("up_vector", (0.0, 1.0, 0.0))),
+        "player_offset_m": tuple(data.get("player_offset_m", (0.0, 0.0))),
     }
     if "horizontal_fov_deg" in data:
         return CameraInfo.from_horizontal_fov(
@@ -78,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                 analyzer.last_occupancy_grid,
                 args.debug_png,
                 rectangle=result.largest_free_rectangle,
+                player_xz=camera.player_offset_m,
             )
     except (OSError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
