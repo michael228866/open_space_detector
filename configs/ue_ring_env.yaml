@@ -1,0 +1,51 @@
+# Ring captures with no character in frame: the capture point IS the spot being
+# judged, so there is no body to mask and no actor pivot to correct for.
+#
+# Ground is fitted with RANSAC rather than assumed: these points sit on sloped
+# roofs and uneven terrain, measured 2.4-6.6 deg off the rig's up vector, where
+# a plane perpendicular to that vector is simply the wrong floor.
+depth:
+  min_depth_m: 0.20
+  max_depth_m: 20.0
+  sample_stride: 3
+
+ground:
+  # The rig's camera height still bounds the search, but the plane itself is
+  # fitted, so a slope does not get read as an obstacle.
+  mode: ransac
+  distance_tolerance_m: 0.12
+  max_tilt_deg: 30.0
+  ransac_iterations: 300
+  min_inlier_ratio: 0.05
+
+occupancy:
+  width_m: 12.0
+  depth_m: 12.0
+  resolution_m: 0.10
+  # 0.15 counts garden grass and flowers (measured 0.15-0.23 m tall) as
+  # obstacles, and the safety margin then inflates each tuft onto the player.
+  # Raising it to 0.25 lifts reachable area 47.5 -> 71.1 m2 at the open point
+  # while the blocked point barely moves (10.2 -> 10.6 m2). Saturates above 0.25.
+  min_obstacle_height_m: 0.25
+  max_obstacle_height_m: 2.20
+  safety_margin_m: 0.25
+  raycast_free_space: true
+  # No character in frame, so nothing to exclude. A non-zero radius here would
+  # erase real obstacles standing on the spot being judged.
+  player_radius_m: 0.0
+
+open_space:
+  min_free_area_m2: 16.0
+  min_rectangle_width_m: 4.0
+  min_rectangle_depth_m: 4.0
+  min_player_clearance_m: 1.0
+  max_obstacle_ratio: 0.15
+  max_unknown_ratio: 0.45
+  nearby_unknown_is_unsafe: true
+
+scoring:
+  free_area_weight: 0.30
+  rectangle_weight: 0.25
+  clearance_weight: 0.20
+  obstacle_weight: 0.10
+  known_space_weight: 0.15

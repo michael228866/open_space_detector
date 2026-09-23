@@ -27,33 +27,45 @@ Calibration verified against these captures:
 - the camera's world right vector is `(-sin yaw, cos yaw)`. Solved from the ring:
   this convention puts the character at one consistent world offset across all
   12 views (std 9 cm); the opposite sign scatters it (std 47 cm).
-- `render_metadata.location` sits `GROUND_BIAS_M` above the floor, measured
-  identically in both captured points.
+Two capture shapes exist, and they need different settings:
 
-`render_metadata.location` is NOT the character's position: the body sits 0.66 m
-away at point 1 and 1.12 m at point 2, in different directions. The engine does
-not export the actor location, so `locate_player_from_motion` recovers it from
-the only cue left in the frame. The camera is static within a folder, so every
-pixel that changes between frames belongs to the character.
+- No character in frame, one frame per camera. `render_metadata.location` is the
+  spot being judged, so nothing is masked and the ground bias is zero. Terrain is
+  often sloped, so fit the ground with `mode: ransac` (configs/ue_ring_env.yaml).
+- A character in frame, many frames per camera. Then `location` is the actor and
+  sits about 0.10 m above the floor (`--ground-bias-m 0.10`), the body is 0.66 to
+  1.12 m away from it, and `locate_player_from_motion` finds them from the pixels
+  that move between frames of a static camera.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import dataclasses
+import io
 import json
 import math
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+if __package__ is None:  # run straight from a checkout, without installing
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from free_space_analyzer import AnalyzerConfig, CameraInfo, FreeSpaceAnalyzer, load_config
 from free_space_analyzer.depth import preprocess_depth
 from free_space_analyzer.free_space import analyze_free_space
 from free_space_analyzer.geometry import depth_to_point_cloud, points_to_ground_coordinates
-from free_space_analyzer.ground import known_height_plane
+from free_space_analyzer.ground import (
+    GroundEstimationError,
+    estimate_ground,
+    known_height_plane,
+)
 from free_space_analyzer.models import GridState, GroundPlane, OccupancyGrid
 from free_space_analyzer.occupancy import build_occupancy_grid
 from free_space_analyzer.scoring import evaluate_requirements, score_space
@@ -61,10 +73,11 @@ from free_space_analyzer.visualization import render_occupancy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# The floor sits this far below `render_metadata.location`. Measured as the
-# median ground height under the assumed plane: -0.097 m at point 1 and
-# -0.101 m at point 2, across all 12 views of each.
-GROUND_BIAS_M = 0.10
+# How far the floor sits below `render_metadata.location`. Zero when the capture
+# point is placed on the ground, which is the case whenever no character is in
+# frame. Captures that put a character there report an actor pivot about 0.10 m
+# above the floor, so those need `--ground-bias-m 0.10`.
+DEFAULT_GROUND_BIAS_M = 0.0
 
 # A depth pixel that shifts by more than this between two frames is the moving
 # character rather than encoding noise.
@@ -147,6 +160,7 @@ def camera_from_capture(
     camera_json: dict,
     subject_location_cm: list[float],
     subject_offset_cm: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ground_bias_m: float = DEFAULT_GROUND_BIAS_M,
 ) -> CameraInfo:
     """Build CameraInfo from one engine pose plus where the character stands.
 
@@ -181,7 +195,7 @@ def camera_from_capture(
         fy=float(camera_json["fl_y"]),
         cx=float(camera_json["cx"]),
         cy=float(camera_json["cy"]),
-        camera_height_m=float(camera_cm[2] - subject_cm[2]) / 100.0 + GROUND_BIAS_M,
+        camera_height_m=float(camera_cm[2] - subject_cm[2]) / 100.0 + ground_bias_m,
         up_vector=(0.0, math.cos(down_pitch), -math.sin(down_pitch)),
         player_offset_m=(lateral_m, forward_m),
     )
@@ -193,6 +207,7 @@ def load_capture(
     subject_offset_cm: tuple[float, float, float] = (0.0, 0.0, 0.0),
     config: AnalyzerConfig | None = None,
     motion_frame: int | None = None,
+    ground_bias_m: float = DEFAULT_GROUND_BIAS_M,
 ) -> Capture:
     """Load one frame. With `config`, the character is located and masked out.
 
@@ -203,9 +218,18 @@ def load_capture(
     metadata = json.loads((folder.parent / "render_metadata.json").read_text(encoding="utf-8"))
     camera_json = json.loads((folder / f"{frame:04d}.camera.json").read_text(encoding="utf-8"))
     depth = decode_depth_png(folder / f"{frame:04d}.depth.png")
-    camera = camera_from_capture(camera_json, metadata["location"], subject_offset_cm)
+    camera = camera_from_capture(
+        camera_json, metadata["location"], subject_offset_cm, ground_bias_m
+    )
     located = False
-    if config is not None and motion_frame is not None and motion_frame != frame:
+    # A single-frame capture has no motion to read, and nothing to read it for:
+    # no character in frame means the capture point is the spot being judged.
+    has_motion_frame = (
+        motion_frame is not None
+        and motion_frame != frame
+        and (folder / f"{motion_frame:04d}.depth.png").exists()
+    )
+    if config is not None and has_motion_frame:
         mask = motion_mask(folder, frame, motion_frame)
         player = locate_player_from_motion(depth, mask, camera, config)
         if player is not None:
@@ -231,6 +255,7 @@ def fuse_views(
     config: AnalyzerConfig,
     frame: int = 0,
     motion_frame: int | None = 12,
+    ground_bias_m: float = DEFAULT_GROUND_BIAS_M,
 ) -> tuple[OccupancyGrid, int]:
     """Merge every view of one spot into a single player-centred grid.
 
@@ -246,7 +271,9 @@ def fuse_views(
     # cameras; stream in two passes if a rig ever gets much larger.
     views = []
     for folder in folders:
-        capture = load_capture(folder, frame, config=config, motion_frame=motion_frame)
+        capture = load_capture(
+            folder, frame, config=config, motion_frame=motion_frame, ground_bias_m=ground_bias_m
+        )
         camera_json = json.loads((folder / f"{frame:04d}.camera.json").read_text(encoding="utf-8"))
         position, forward, right = _world_basis(camera_json)
         lateral, ahead = capture.camera.player_offset_m
@@ -267,7 +294,12 @@ def fuse_views(
     for capture, position, forward, right, _ in views:
         depth = preprocess_depth(capture.depth_m, capture.camera, config.depth)
         points = depth_to_point_cloud(depth, capture.camera, stride=config.depth.sample_stride)
-        plane = known_height_plane(points, capture.camera, config.ground)
+        try:
+            plane = estimate_ground(points, capture.camera, config.ground)
+        except GroundEstimationError:
+            # One view failing to find a floor is not a reason to lose the point;
+            # the rig's own camera height still describes a usable plane.
+            plane = known_height_plane(points, capture.camera, config.ground)
         x, z, height = points_to_ground_coordinates(points, plane)
         # This view's ground coordinates into the shared player-centred frame.
         world = position + np.outer(x, right) + np.outer(z, forward) - player_world
@@ -292,8 +324,126 @@ def fuse_views(
     return merged, len(views)
 
 
-def capture_folders(label_dir: Path) -> list[Path]:
-    return sorted(p for p in label_dir.iterdir() if p.is_dir() and any(p.glob("*.depth.png")))
+def _thumbnail(path: Path, width: int = 300) -> str:
+    """One image as an inline data URI, so the report stays a single file."""
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        image.thumbnail((width, width), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=72)
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+def write_report(cards: list[dict], path: Path) -> Path:
+    """A single self-contained page: every point at a glance, best first.
+
+    Written locally rather than published, because these are unreleased game
+    frames. Open it in a browser; nothing is uploaded anywhere.
+    """
+    cards = sorted(cards, key=lambda card: -card["score"])
+    blocks = []
+    for card in cards:
+        views = "".join(f'<img src="{src}">' for src in card["views"])
+        reasons = "".join(f"<li>{reason}</li>" for reason in card["reasons"]) or "<li>-</li>"
+        blocks.append(f"""
+<section class="{'ok' if card['open'] else 'bad'}">
+  <header>
+    <span class="badge">{'OPEN' if card['open'] else 'NOT OPEN'}</span>
+    <h2>{card['name']}</h2>
+    <span class="score">{card['score']:.0f}</span>
+  </header>
+  <div class="body">
+    <figure><img class="grid" src="{card['grid']}">
+      <figcaption>fused occupancy</figcaption></figure>
+    <div class="views">{views}</div>
+    <dl>
+      <dt>reachable</dt><dd>{card['reach']:.1f} m&sup2;</dd>
+      <dt>rectangle</dt><dd>{card['rect']}</dd>
+      <dt>nearest obstacle</dt><dd>{card['obstacle']}</dd>
+      <dt>obstacle / unknown</dt><dd>{card['obstacle_ratio']:.0%} / {card['unknown']:.0%}</dd>
+      <dt>ground fit</dt><dd>{card['ground']:.2f}</dd>
+      <dt>fails</dt><dd><ul>{reasons}</ul></dd>
+    </dl>
+  </div>
+</section>""")
+    style = """
+body{font:14px system-ui,sans-serif;margin:0;padding:24px;background:#f6f7f9;color:#1c1f23}
+h1{font-size:20px;margin:0 0 4px}
+p.sub{color:#666;margin:0 0 20px}
+section{background:#fff;border-radius:10px;margin-bottom:16px;overflow:hidden;
+  box-shadow:0 1px 3px rgba(0,0,0,.12);border-left:6px solid #d0d4da}
+section.ok{border-left-color:#2e9e5b}
+section.bad{border-left-color:#d4453f}
+header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #eceef1}
+header h2{font-size:15px;margin:0;font-weight:600;flex:1;word-break:break-all}
+.badge{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 8px;border-radius:4px;
+  background:#eceef1;color:#555}
+.ok .badge{background:#e3f4ea;color:#1c6b3c}.bad .badge{background:#fbe6e5;color:#9e2b27}
+.score{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+.body{display:flex;gap:16px;padding:16px;flex-wrap:wrap;align-items:flex-start}
+.grid{width:260px;border-radius:6px;background:#3f4650}
+figure{margin:0}figcaption{font-size:11px;color:#888;text-align:center;margin-top:4px}
+.views{display:grid;grid-template-columns:repeat(2,150px);gap:6px}
+.views img{width:150px;border-radius:4px;display:block}
+dl{display:grid;grid-template-columns:auto auto;gap:4px 14px;margin:0;font-size:13px}
+dl{align-content:start}
+dt{color:#777}dd{margin:0;font-variant-numeric:tabular-nums}
+dd ul{margin:0;padding-left:16px}dd li{color:#9e2b27}
+@media(max-width:640px){.body{flex-direction:column}.grid,.views{width:100%}}
+"""
+    opened = sum(1 for card in cards if card["open"])
+    html = (
+        "<!doctype html><meta charset='utf-8'><title>Capture points</title>"
+        f"<style>{style}</style>"
+        f"<h1>Capture points</h1><p class='sub'>{opened} of {len(cards)} open, best first. "
+        "Grey is unobserved, white free, red blocked (safety margin included); "
+        "green box is the largest usable rectangle, blue dot the evaluated point.</p>"
+        + "".join(blocks)
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
+def _ground_fit(folders: list[Path], config: AnalyzerConfig, args: argparse.Namespace) -> float:
+    """Mean ground inlier ratio over the views, as a trust score for the geometry."""
+    ratios = []
+    for folder in folders:
+        capture = load_capture(folder, args.frame, ground_bias_m=args.ground_bias_m)
+        depth = preprocess_depth(capture.depth_m, capture.camera, config.depth)
+        points = depth_to_point_cloud(depth, capture.camera, stride=config.depth.sample_stride)
+        try:
+            ratios.append(estimate_ground(points, capture.camera, config.ground).inlier_ratio)
+        except GroundEstimationError:
+            ratios.append(0.0)
+    return float(np.mean(ratios)) if ratios else 0.0
+
+
+def capture_folders(point_dir: Path) -> list[Path]:
+    """The camera folders of one capture point."""
+    return sorted(p for p in point_dir.iterdir() if p.is_dir() and any(p.glob("*.depth.png")))
+
+
+def capture_points(path: Path) -> list[Path]:
+    """Capture points at `path`, whether it is one point or a folder of them.
+
+    Windows shells do not expand `images/*/`, so passing the parent has to work.
+    """
+    if not path.is_dir():
+        raise ValueError(f"{path} is not a directory")
+    if (path / "render_metadata.json").exists():
+        return [path]
+    points = sorted(
+        child
+        for child in path.iterdir()
+        if child.is_dir() and (child / "render_metadata.json").exists()
+    )
+    if not points:
+        raise ValueError(
+            f"{path} holds no capture points; expected render_metadata.json in it "
+            "or in its subdirectories"
+        )
+    return points
 
 
 def main() -> int:
@@ -315,6 +465,17 @@ def main() -> int:
         help="report each camera separately instead of fusing them (diagnostic)",
     )
     parser.add_argument(
+        "--report",
+        type=Path,
+        help="write a single self-contained HTML page showing every point at a glance",
+    )
+    parser.add_argument(
+        "--ground-bias-m",
+        type=float,
+        default=DEFAULT_GROUND_BIAS_M,
+        help="how far the floor sits below the capture point (0.10 with a character in frame)",
+    )
+    parser.add_argument(
         "--subject-offset-cm",
         type=float,
         nargs=3,
@@ -326,10 +487,18 @@ def main() -> int:
 
     analyzer = FreeSpaceAnalyzer(load_config(args.config))
     exit_code = 0
-    for label in args.labels:
+    cards: list[dict] = []
+    labels: list[Path] = []
+    for given in args.labels:
+        try:
+            labels.extend(capture_points(given))
+        except ValueError as error:
+            print(f"error: {error}")
+            exit_code = 1
+    for label in labels:
         folders = capture_folders(label)
         if not folders:
-            print(f"{label}: no capture folders found")
+            print(f"{label}: no camera folders found")
             exit_code = 1
             continue
         metadata = json.loads((label / "render_metadata.json").read_text(encoding="utf-8"))
@@ -340,6 +509,7 @@ def main() -> int:
                 analyzer.config,
                 args.frame,
                 None if args.motion_frame < 0 else args.motion_frame,
+                args.ground_bias_m,
             )
             metrics = analyze_free_space(grid, analyzer.config.open_space)
             is_open, reasons = evaluate_requirements(
@@ -358,6 +528,35 @@ def main() -> int:
                     args.debug_dir / f"{label.name}-fused.png",
                     rectangle=metrics.largest_rectangle,
                 )
+            if args.report:
+                rect = metrics.largest_rectangle
+                with tempfile.TemporaryDirectory() as tmp:
+                    png = render_occupancy(
+                        grid, Path(tmp) / "g.png", rectangle=rect, scale=3
+                    )
+                    grid_uri = _thumbnail(png, 320)
+                # Four cameras spread around the ring is enough to recognize a place.
+                spread = [folders[round(i * len(folders) / 4)] for i in range(4)]
+                cards.append(
+                    {
+                        "name": label.name,
+                        "open": is_open,
+                        "score": score,
+                        "reach": metrics.player_reachable_area_m2,
+                        "rect": f"{rect.width_m:.1f} x {rect.depth_m:.1f} m" if rect else "none",
+                        "obstacle": (
+                            f"{metrics.nearest_obstacle_m:.2f} m"
+                            if metrics.nearest_obstacle_m is not None
+                            else "none"
+                        ),
+                        "obstacle_ratio": metrics.obstacle_ratio,
+                        "unknown": metrics.unknown_ratio,
+                        "ground": _ground_fit(folders, analyzer.config, args),
+                        "reasons": [r.replace("_", " ") for r in reasons],
+                        "grid": grid_uri,
+                        "views": [_thumbnail(f / f"{args.frame:04d}.rgb.png") for f in spread],
+                    }
+                )
             continue
         verdicts = []
         for folder in folders:
@@ -367,6 +566,7 @@ def main() -> int:
                 tuple(args.subject_offset_cm),
                 config=analyzer.config,
                 motion_frame=None if args.motion_frame < 0 else args.motion_frame,
+                ground_bias_m=args.ground_bias_m,
             )
             result = analyzer.analyze(capture.depth_m, capture.camera)
             verdicts.append(result.is_open_space)
@@ -391,6 +591,8 @@ def main() -> int:
         agreement = "all views agree" if opened in (0, len(verdicts)) else "VIEWS DISAGREE"
         print(f"  -> {opened}/{len(verdicts)} views call it open, {agreement}")
 
+    if args.report and cards:
+        print(f"\nwrote {write_report(cards, args.report)}")
     return exit_code
 
 
