@@ -39,7 +39,14 @@ open_space:
   min_rectangle_width_m: 4.0
   min_rectangle_depth_m: 4.0
   min_player_clearance_m: 1.0
-  max_obstacle_ratio: 0.15
+  # Disabled for fused grids, not tuned. This ratio divides by the grid area,
+  # which is a setting, so the same spot moves with it: one point reads 3% on a
+  # 10 m grid and 32% on a 20 m one, flipping its verdict with nothing in the
+  # world changed. Across 22 points it only ever produced false rejections --
+  # three spots with 104-115 m2 reachable and 8x6 m rectangles. Reachable area,
+  # the rectangle and clearance already measure usability and still reject the
+  # other 13. Still reported in the result for diagnosis.
+  max_obstacle_ratio: 1.0
   max_unknown_ratio: 0.45
   nearby_unknown_is_unsafe: true
 
