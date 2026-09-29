@@ -432,6 +432,28 @@ def _ground_fit(folders: list[Path], config: AnalyzerConfig, args: argparse.Name
     return float(np.mean(ratios)) if ratios else 0.0
 
 
+# The rig aligns the ring to the local surface, so a few degrees is normal.
+# Beyond this the sampled normal is usually a boulder or wall rather than the
+# ground: one capture came back tilted 33.7 degrees over ground measuring 2.5.
+RING_TILT_WARN_DEG = 12.0
+
+
+def ring_tilt_deg(folders: list[Path], frame: int = 0) -> float:
+    """Tilt of the camera ring's plane away from horizontal."""
+    positions = np.array(
+        [
+            json.loads((folder / f"{frame:04d}.camera.json").read_text(encoding="utf-8"))[
+                "ue_location_cm"
+            ]
+            for folder in folders
+        ]
+    )
+    if len(positions) < 3:
+        return 0.0
+    _, _, right = np.linalg.svd(positions - positions.mean(axis=0))
+    return float(np.degrees(np.arccos(min(1.0, abs(right[-1][2])))))
+
+
 def capture_folders(point_dir: Path) -> list[Path]:
     """The camera folders of one capture point."""
     return sorted(p for p in point_dir.iterdir() if p.is_dir() and any(p.glob("*.depth.png")))
@@ -516,6 +538,13 @@ def main() -> int:
             continue
         metadata = json.loads((label / "render_metadata.json").read_text(encoding="utf-8"))
         print(f"\n{label}  ({metadata['combo_id']}, point {metadata['point_id']})")
+        tilt = ring_tilt_deg(folders, args.frame)
+        if tilt > RING_TILT_WARN_DEG:
+            print(
+                f"  WARNING: camera ring is tilted {tilt:.1f} deg. The rig aligns it to the"
+                " surface it sampled, so it likely read a wall or boulder rather than the"
+                " ground. Treat this point's verdict as unreliable."
+            )
         if not args.per_view:
             grid, views = fuse_views(
                 folders,
