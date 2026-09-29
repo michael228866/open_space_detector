@@ -256,7 +256,7 @@ def fuse_views(
     frame: int = 0,
     motion_frame: int | None = 12,
     ground_bias_m: float = DEFAULT_GROUND_BIAS_M,
-) -> tuple[OccupancyGrid, int]:
+) -> tuple[OccupancyGrid, int, float]:
     """Merge every view of one spot into a single player-centred grid.
 
     A lone view cannot see past the character it is judging, and it cannot see
@@ -301,6 +301,7 @@ def fuse_views(
 
     merged: OccupancyGrid | None = None
     observed = 0
+    slopes: list[float] = []
     for capture, position, forward, right, _ in views:
         depth = preprocess_depth(capture.depth_m, capture.camera, config.depth)
         points = depth_to_point_cloud(depth, capture.camera, stride=config.depth.sample_stride)
@@ -310,6 +311,13 @@ def fuse_views(
             # One view failing to find a floor is not a reason to lose the point;
             # the rig's own camera height still describes a usable plane.
             plane = known_height_plane(points, capture.camera, config.ground)
+        slopes.append(
+            math.degrees(
+                math.acos(
+                    min(1.0, abs(float(plane.normal @ capture.camera.normalized_up())))
+                )
+            )
+        )
         x, z, height = points_to_ground_coordinates(points, plane)
         # This view's ground coordinates into the shared player-centred frame.
         world = position + np.outer(x, right) + np.outer(z, forward) - player_world
@@ -331,7 +339,7 @@ def fuse_views(
         merged.cells[grid.cells == GridState.OCCUPIED] = GridState.OCCUPIED
     assert merged is not None
     merged.observed_points = observed
-    return merged, len(views)
+    return merged, len(views), float(np.median(slopes)) if slopes else 0.0
 
 
 def _thumbnail(path: Path, width: int = 300) -> str:
@@ -432,10 +440,15 @@ def _ground_fit(folders: list[Path], config: AnalyzerConfig, args: argparse.Name
     return float(np.mean(ratios)) if ratios else 0.0
 
 
-# The rig aligns the ring to the local surface, so a few degrees is normal.
-# Beyond this the sampled normal is usually a boulder or wall rather than the
-# ground: one capture came back tilted 33.7 degrees over ground measuring 2.5.
-RING_TILT_WARN_DEG = 12.0
+# The rig aligns the ring to the surface it sampled, so a tilted ring is correct
+# over sloped ground and says nothing on its own: of 20 points, 9 tilt past 12
+# degrees but 7 of those match the real slope within 6. What does not match is
+# the rig having sampled something other than the ground.
+RING_VS_GROUND_WARN_DEG = 10.0
+
+# Ground the player is meant to do something on. Past this the fused area is a
+# hillside, however open it measures; 2 of 20 points sit on 20+ degree slopes.
+STEEP_GROUND_WARN_DEG = 15.0
 
 
 def ring_tilt_deg(folders: list[Path], frame: int = 0) -> float:
@@ -539,20 +552,25 @@ def main() -> int:
         metadata = json.loads((label / "render_metadata.json").read_text(encoding="utf-8"))
         print(f"\n{label}  ({metadata['combo_id']}, point {metadata['point_id']})")
         tilt = ring_tilt_deg(folders, args.frame)
-        if tilt > RING_TILT_WARN_DEG:
-            print(
-                f"  WARNING: camera ring is tilted {tilt:.1f} deg. The rig aligns it to the"
-                " surface it sampled, so it likely read a wall or boulder rather than the"
-                " ground. Treat this point's verdict as unreliable."
-            )
         if not args.per_view:
-            grid, views = fuse_views(
+            grid, views, slope = fuse_views(
                 folders,
                 analyzer.config,
                 args.frame,
                 None if args.motion_frame < 0 else args.motion_frame,
                 args.ground_bias_m,
             )
+            if tilt - slope > RING_VS_GROUND_WARN_DEG:
+                print(
+                    f"  WARNING: the ring is tilted {tilt:.1f} deg but the ground under this"
+                    f" point measures {slope:.1f} deg. The rig sampled something other than"
+                    " the ground, so this verdict is unreliable. Re-capture the point."
+                )
+            elif slope > STEEP_GROUND_WARN_DEG:
+                print(
+                    f"  NOTE: the ground here slopes {slope:.1f} deg. Free area is measured"
+                    " on that slope, so judge whether it is somewhere to stand."
+                )
             metrics = analyze_free_space(grid, analyzer.config.open_space)
             is_open, reasons = evaluate_requirements(
                 metrics, analyzer.config.open_space, grid.resolution_m
