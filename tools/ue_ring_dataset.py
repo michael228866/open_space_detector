@@ -271,9 +271,19 @@ def fuse_views(
     # cameras; stream in two passes if a rig ever gets much larger.
     views = []
     for folder in folders:
-        capture = load_capture(
-            folder, frame, config=config, motion_frame=motion_frame, ground_bias_m=ground_bias_m
-        )
+        try:
+            capture = load_capture(
+                folder,
+                frame,
+                config=config,
+                motion_frame=motion_frame,
+                ground_bias_m=ground_bias_m,
+            )
+        except ValueError as error:
+            # One unusable pose is not a reason to lose the point, but it is a
+            # reason to say so: a level ring puts every camera at one height.
+            print(f"  skipping {folder.name}: {error}")
+            continue
         camera_json = json.loads((folder / f"{frame:04d}.camera.json").read_text(encoding="utf-8"))
         position, forward, right = _world_basis(camera_json)
         lateral, ahead = capture.camera.player_offset_m
@@ -409,7 +419,10 @@ def _ground_fit(folders: list[Path], config: AnalyzerConfig, args: argparse.Name
     """Mean ground inlier ratio over the views, as a trust score for the geometry."""
     ratios = []
     for folder in folders:
-        capture = load_capture(folder, args.frame, ground_bias_m=args.ground_bias_m)
+        try:
+            capture = load_capture(folder, args.frame, ground_bias_m=args.ground_bias_m)
+        except ValueError:
+            continue  # already reported while fusing
         depth = preprocess_depth(capture.depth_m, capture.camera, config.depth)
         points = depth_to_point_cloud(depth, capture.camera, stride=config.depth.sample_stride)
         try:
